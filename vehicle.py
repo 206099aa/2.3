@@ -321,18 +321,17 @@ class VehicleAgent:
             self.comm_health = 0.5  # Weak signal in open field
 
     def _broadcast_state(self, now):
+        """
+        Normal semantic broadcast.
+        (MaliciousVehicle will override this to inject False Data)
+        """
         if self.mode == ControlMode.PHYSICS_FALLBACK: return
 
         infra = self.infra.get(self.current_node_id)
         if infra:
-            packet = {
-                'vid': self.id,
-                'pos': self.pos_2d,
-                'vel': self.current_speed,
-                'timestamp': now,
-                'eta': now + 5.0,  # Estimation
-                'duration': 3.0
-            }
+            # 标准真实数据包
+            packet = self._build_semantic_packet(now)
+
             # Infrastructure applies TrustFilter here
             resp = infra.handle_semantic_packet(packet)
 
@@ -340,6 +339,19 @@ class VehicleAgent:
             if resp.get('status') == 'REJECTED_UNTRUSTED':
                 self.trust_status *= 0.9  # Degradation
                 logger.warning(f"[{self.id}] Trusted dropped by infra!")
+
+    def _build_semantic_packet(self, now):
+        """Helper to construct packet, making it easier to override."""
+        return {
+            'vid': self.id,
+            'pos': self.pos_2d,
+            'vel': self.current_speed,
+            'timestamp': now,
+            'pos_uncertainty': self.network_uncertainty,
+            'eta': now + 5.0,  # Estimation
+            'duration': 3.0,
+            'mud_detected': self.env.get('mud_factor', 0.5)  # [Normal] Report True mud
+        }
 
     def _handle_idle_logic(self, dt):
         # Simple mission generator
@@ -377,3 +389,73 @@ class VehicleAgent:
             'force': dynamics['coupler_force_1']
         }
         return self.last_telemetry
+
+
+# =========================================================================
+# [New Class] Malicious Adversary (FDIA)
+# =========================================================================
+
+class MaliciousVehicle(VehicleAgent):
+    """
+    [Adversary] Implements False Data Injection Attacks (FDIA).
+    Inherits from VehicleAgent but overrides communication to inject deceptive data.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # 伪装成 Scout 以便四处游荡并散布虚假信息
+        self.is_scout = True
+        self.mode = ControlMode.ACTIVE_SCOUTING
+        logger.warning(f"⚠️ [Security] Malicious Agent {self.id} Activated!")
+
+    def _plan_active_scouting(self, now):
+        """
+        [Attack Type 1: Lure / Safety Injection]
+        Override scouting logic to report 'Safe' (mud=0.1) even in dangerous areas.
+        """
+        # 1. 执行正常的寻路逻辑 (为了看起来像个正常车)
+        super()._plan_active_scouting(now)
+
+        # 2. 执行攻击：如果当前环境恶劣，反而发送“路况良好”的信号
+        # 这会降低全息流场中该节点的势能，诱骗其他车辆进入拥堵/泥泞区
+        real_mud = self.env.get('mud_factor', 0.5)
+
+        # 只有在真实现象糟糕时才攻击，制造反差
+        if real_mud > 0.6:
+            infra = self.infra.get(self.current_node_id)
+            if infra:
+                # 构造虚假包
+                fake_packet = {
+                    'vid': self.id,
+                    'type': 'RISK_UPDATE',
+                    'mud_detected': 0.1,  # <--- LIE: Report clean road
+                    'timestamp': now
+                }
+                # 注意：这里我们调用 infra 的接口。
+                # 如果 infra 逻辑是简单的 'inject_event(mass)', 我们可能需要注入负质量来“清洗”势能
+                # 或者依靠 infrastructure.py 中对 mud_detected 的特定处理 (如果已实现)
+                # 为了通用性，我们模拟发送一个“低风险”信号
+                # (Assuming infra simply accumulates events based on mass ~ risk)
+                # 注入一个极小的 mass，或者如果可能，注入负值 (Physically impossible but cyber-possible)
+                infra.flow_field.inject_event(mass=-2.0, velocity=10.0)
+                logger.info(f"[Attack] {self.id} injecting FALSE SAFE signal at mud={real_mud}")
+
+    def _build_semantic_packet(self, now):
+        """
+        [Attack Type 2: Physics Anomaly]
+        Override broadcast packet to report physically impossible states.
+        This is used to test the 'BayesianTrustFilter' defense mechanism.
+        """
+        packet = super()._build_semantic_packet(now)
+
+        # 篡改数据：FDIA
+        # 1. 谎报泥泞度 (诱骗全局规划)
+        packet['mud_detected'] = 0.1
+
+        # 2. 谎报速度 (测试物理一致性校验)
+        # 在泥泞中 (real_mud > 0.6)，物理极限速度可能只有 2-3 m/s
+        # 恶意节点谎称自己跑到了 20 m/s
+        if self.env.get('mud_factor', 0.5) > 0.6:
+            packet['vel'] = 20.0
+
+        return packet
