@@ -7,7 +7,8 @@ from datetime import datetime
 # Import Core Modules
 from config_loader import ConfigLoader
 from map_core import GridMap
-from vehicle import VehicleAgent
+# [SCI] 显式导入 MaliciousVehicle 以启用攻击
+from vehicle import VehicleAgent, MaliciousVehicle
 
 # [SCI Integration] New Modules
 from stability_monitor import LyapunovMonitor
@@ -27,7 +28,7 @@ class DecentralizedSimulation:
     Key Features:
     1. No Central Scheduler (Fully Distributed).
     2. Heterogeneous Agents (Scouts + Haulers).
-    3. Adversarial Environment (Jamming + Mud).
+    3. Adversarial Environment (Jamming + Mud + FDIA).
     4. Theoretical Monitoring (Lyapunov).
     """
 
@@ -70,18 +71,26 @@ class DecentralizedSimulation:
     def _deploy_fleet(self):
         """
         Deploy Mixed Platoon: Scouts (Fast/Light) + Haulers (Heavy/Slow).
+        [SCI Setup] Includes a Malicious Agent to test Cyber-Resilience.
         """
         # Configuration for 4 vehicles
+        # ID, Type, Start Node, Is_Malicious_Class
         deployment_plan = [
-            # ID, Type, Start Node
-            ("Scout_Alpha", "Fast_Scout", "Start_1"),
-            ("Hauler_One", "Heavy_Hauler", "Start_1"),  # Follows Alpha
-            ("Scout_Beta", "Fast_Scout", "Start_2"),
-            ("Hauler_Two", "Heavy_Hauler", "Start_2")
+            # Group 1: Normal
+            ("Scout_Alpha", "Fast_Scout", "Start_1", False),
+            ("Hauler_One", "Heavy_Hauler", "Start_1", False),
+
+            # Group 2: Under Attack
+            # [Attack] Replace the second Scout with a Malicious Vehicle
+            ("Malicious_Attacker", "Fast_Scout", "Start_2", True),
+            ("Hauler_Two", "Heavy_Hauler", "Start_2", False)
         ]
 
-        for v_id, v_type, start_node in deployment_plan:
-            agent = VehicleAgent(
+        for v_id, v_type, start_node, is_malicious in deployment_plan:
+            # Select Agent Class
+            AgentClass = MaliciousVehicle if is_malicious else VehicleAgent
+
+            agent = AgentClass(
                 agent_id=v_id,
                 vehicle_type_cfg=self.cfg['vehicle_types'][v_type],
                 env_config=self.env_cfg,
@@ -90,7 +99,9 @@ class DecentralizedSimulation:
                 infra_agents=self.infra_agents
             )
             self.vehicles.append(agent)
-            logger.info(f" -> Deployed {v_id} ({v_type}) at {start_node}")
+
+            role = "MALICIOUS" if is_malicious else v_type
+            logger.info(f" -> Deployed {v_id} ({role}) at {start_node}")
 
     def step(self, t, dt):
         """
