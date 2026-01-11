@@ -24,12 +24,6 @@ class DecentralizedSimulation:
     """
     [Experiment Orchestrator]
     Physics-Aware Distributed Edge Control Simulation.
-
-    Key Features:
-    1. No Central Scheduler (Fully Distributed).
-    2. Heterogeneous Agents (Scouts + Haulers).
-    3. Adversarial Environment (Jamming + Mud + FDIA).
-    4. Theoretical Monitoring (Lyapunov).
     """
 
     def __init__(self, config_path="config.yaml"):
@@ -37,18 +31,15 @@ class DecentralizedSimulation:
             raise FileNotFoundError(f"Config {config_path} not found")
 
         self.cfg = ConfigLoader.load(config_path)
-        self.env_cfg = self.cfg['environment']
 
         # 1. Initialize Spectrum (Cyber Environment)
         self.spectrum = SpectrumEnvironment()
-        # [Adversarial] Deploy a Jammer at a critical junction
         self.spectrum.deploy_jammer(pos=[300, 300], radius=100.0, power_dbm=20.0)
 
         # 2. Initialize Heterogeneous Map & Edge Infrastructure
         logger.info("Initializing Map with Unstructured Mud Fields...")
         self.map = GridMap(self.cfg)
 
-        # Collect Edge Agents
         self.infra_agents = {
             nid: node.agent
             for nid, node in self.map.nodes.items()
@@ -71,69 +62,60 @@ class DecentralizedSimulation:
     def _deploy_fleet(self):
         """
         Deploy Mixed Platoon: Scouts (Fast/Light) + Haulers (Heavy/Slow).
-        [SCI Setup] Includes a Malicious Agent to test Cyber-Resilience.
+        [Fixed] Updated instantiation to match new VehicleAgent signature.
         """
         # Configuration for 4 vehicles
-        # ID, Type, Start Node, Is_Malicious_Class
+        # ID, Train_Type_Name, Start_Node, Is_Malicious_Class
         deployment_plan = [
             # Group 1: Normal
             ("Scout_Alpha", "Fast_Scout", "Start_1", False),
             ("Hauler_One", "Heavy_Hauler", "Start_1", False),
 
             # Group 2: Under Attack
-            # [Attack] Replace the second Scout with a Malicious Vehicle
             ("Malicious_Attacker", "Fast_Scout", "Start_2", True),
             ("Hauler_Two", "Heavy_Hauler", "Start_2", False)
         ]
 
-        for v_id, v_type, start_node, is_malicious in deployment_plan:
+        for v_id, t_type, start_node, is_malicious in deployment_plan:
             # Select Agent Class
             AgentClass = MaliciousVehicle if is_malicious else VehicleAgent
 
+            # [Fix] Pass 't_type' (string) and 'self.cfg' (full config)
             agent = AgentClass(
                 agent_id=v_id,
-                vehicle_type_cfg=self.cfg['vehicle_types'][v_type],
-                env_config=self.env_cfg,
+                train_type_name=t_type,  # <--- Corrected Argument
+                global_config=self.cfg,  # <--- Corrected Argument
                 start_node=start_node,
                 map_graph=self.map,
                 infra_agents=self.infra_agents
             )
             self.vehicles.append(agent)
 
-            role = "MALICIOUS" if is_malicious else v_type
+            role = "MALICIOUS" if is_malicious else t_type
             logger.info(f" -> Deployed {v_id} ({role}) at {start_node}")
 
     def step(self, t, dt):
-        """
-        [Parallel Execution Emulation]
-        Simulates one time-step of the Distributed System.
-        Strictly NO central control logic here.
-        """
-        # 1. Infrastructure Update (Edge Computing & Physics)
+        # 1. Infrastructure Update
         self.map.update_infrastructure(dt, t)
 
-        # 2. Vehicle Agents Update (Sense -> Plan -> Act)
+        # 2. Vehicle Agents Update
         step_data = []
         for v in self.vehicles:
-            # Agents run autonomously
             telemetry = v.step(dt, t)
-
-            # [Data Collection]
             if telemetry:
                 log_entry = telemetry.copy()
                 log_entry.update({
                     'time': t,
-                    'mud_global': self.env_cfg['mud_factor'],  # Ground truth for analysis
+                    'mud_global': self.cfg['environment']['mud_factor'],
                     'exp_id': self.cfg['meta']['experiment_id']
                 })
                 step_data.append(log_entry)
 
         self.logs.extend(step_data)
 
-        # 3. Theoretical Validation (Observer, not Controller)
+        # 3. Theoretical Validation
         V_t = self.monitor.step(t, self.vehicles, self.infra_agents)
 
-        # [Console Heartbeat]
         if int(t) % 10 == 0 and abs(t - int(t)) < dt / 2:
             print(f"T={t:04.0f}s | Lyapunov V={V_t:.2f} | Active Vehicles={len(self.vehicles)}", end='\r')
 
@@ -143,24 +125,19 @@ class DecentralizedSimulation:
 
         logger.info(f"Starting Simulation (T={duration}s)...")
 
-        # Generator for Visualization
         def sim_generator():
             t = 0.0
             step_count = 0
-            RENDER_SKIP = 20  # 50Hz physics -> 2.5Hz render
+            RENDER_SKIP = 20
 
             while t < duration:
                 self.step(t, dt)
-
                 step_count += 1
                 if step_count % RENDER_SKIP == 0:
                     yield t, self.vehicles
-
                 t += dt
 
-        # Start Loop
         try:
-            # Check if headless or visual
             if self.cfg['simulation']['visualization']:
                 self.viz.start(sim_generator)
             else:
@@ -176,13 +153,11 @@ class DecentralizedSimulation:
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-        # 1. Save Experimental Data
         df = pd.DataFrame(self.logs)
         filename = f"data/SCI_Exp_{timestamp}.csv"
         df.to_csv(filename, index=False)
         logger.info(f"\nExperimental Data Saved: {filename}")
 
-        # 2. Save Lyapunov Stability Proof
         df_stability = self.monitor.export_data()
         file_stab = f"data/SCI_Stability_{timestamp}.csv"
         df_stability.to_csv(file_stab, index=False)
