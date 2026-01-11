@@ -1,0 +1,84 @@
+# config.yaml
+# [SCI Configuration]
+# Experimental Setup for Physics-Aware Distributed Edge Control (Advanced Multi-Body)
+
+meta:
+  experiment_id: "SCI_Final_MBD_Submission"
+  description: "Heterogeneous Multi-Agent System with High-Fidelity Train Dynamics"
+
+simulation:
+  duration: 2000.0
+  dt: 0.01
+  speed_up: 1.0
+  visualization: true
+  safe_distance: 50.0 # Increased for long trains
+
+environment:
+  mud_factor: 0.5
+  jam_prob_base: 0.0001
+
+topology:
+  rows: 4
+  cols: 4
+  cell_spacing: 300.0
+  depots:
+    Start_1: [-150, 900]
+    Start_2: [-150, 300]
+
+# [NEW] Atomic Vehicle Unit Specifications
+vehicle_specs:
+  Loco_Class_A:
+    type: "locomotive"
+    mass: 23000.0       # 23 tons (Fixed)
+    length: 6.0         # 6 meters
+    max_power: 120000.0 # 120 kW
+    max_speed: 15.0     # m/s
+    adhesion_weight: 23000.0 # For traction limit
+    # PID for heavy load
+    pid: {kp: 8000, ki: 50, kd: 1000}
+    link_type: "LoRa"
+
+  Loco_Class_B: # Lighter, faster scout loco
+    type: "locomotive"
+    mass: 5000.0        # 5 tons
+    length: 4.0
+    max_power: 60000.0
+    max_speed: 20.0
+    adhesion_weight: 5000.0
+    # PID for agility
+    pid: {kp: 3000, ki: 20, kd: 500}
+    link_type: "WiFi"
+
+  Wagon_Type_X: # Standard Freight Wagon
+    type: "wagon"
+    tare_mass: 5000.0   # Empty weight
+    max_payload: 15000.0 # Max cargo capacity
+    length: 5.0
+    drag_coeff: 0.35
+
+# [NEW] Flexible Train Formation Rules
+train_configurations:
+  Heavy_Hauler:
+    locomotive: "Loco_Class_A"
+    wagon_type: "Wagon_Type_X"
+    wagon_count: [3, 6]  # Randomly 3 to 6 wagons
+    payload_distribution:
+      min_fill: 0.5      # Minimum 50% load
+      max_fill: 1.0      # Maximum 100% load
+    role: "hauler"
+
+  Fast_Scout:
+    locomotive: "Loco_Class_B"
+    wagon_type: "Wagon_Type_X"
+    wagon_count: [0, 0]  # Solo loco (Scout)
+    payload_distribution:
+      min_fill: 0.0
+      max_fill: 0.0
+    role: "scout"
+
+energy_params:
+  idle_power: 50.0
+  motor_efficiency: 0.88
+  comm_energy:
+    LoRa: 0.01
+    WiFi: 0.005
