@@ -122,12 +122,14 @@ class GridMap:
                     stop_id = f"Stop_H_{r}_{c}"
                     mid_pos = ((self.nodes[u].pos[0] + (c + 1) * self.spacing) / 2, self.nodes[u].pos[1])
 
-                    # Stops are dumb nodes (no switch agent)
+                    # Stops are dumb nodes (no switch agent) -> [FIX] Changed to True
+                    # Reason: Intermediate stops MUST participate in diffusion to ensure field connectivity.
+                    # Otherwise, pressure at junctions cannot propagate through the edge.
                     mid_mud = self.field_gen.get_value_at(mid_pos[0], mid_pos[1], self.max_dim, self.max_dim)
                     mid_env = self.cfg['environment'].copy()
                     mid_env['mud_factor'] = mid_mud
 
-                    self._add_node(stop_id, mid_pos, mid_env, has_switch=False)
+                    self._add_node(stop_id, mid_pos, mid_env, has_switch=True)  # Enabled Agent
 
                     self._add_edge(u, stop_id)
                     self._add_edge(stop_id, v)
@@ -165,18 +167,36 @@ class GridMap:
         dist = np.linalg.norm(p1 - p2)
 
         # Edge properties inherit from connected nodes (Average Mud)
-        m1 = self.nodes[u].agent.mud if self.nodes[u].agent else self.nodes[u].pos[0] * 0  # Dummy fallback
-        # Better fallback: query field generator again or store mud in NodeObject
-        # For simplicity here, we assume node objects hold environmental data implicitly
-        # (In full logic, NodeObject would store 'mud' directly)
+        # m1 = self.nodes[u].agent.mud if self.nodes[u].agent else self.nodes[u].pos[0] * 0  # Dummy fallback
 
         self.graph.add_edge(u, v, weight=dist, length=dist)
 
     def update_infrastructure(self, dt, time):
         """
         [Main Loop Hook]
-        Updates all distributed edge agents.
+        Updates all distributed edge agents with Diffusion Logic.
         """
+        # Step 1: Snapshot current potentials (Synchronous update to avoid race conditions)
+        node_potentials = {}
+        for nid, node in self.nodes.items():
+            if node.agent:
+                node_potentials[nid] = node.agent.flow_field.local_pressure
+
+        # Step 2: Diffusion Step (Exchange)
+        for nid, node in self.nodes.items():
+            if node.agent:
+                # Find neighbors in the graph
+                neighbors = list(self.graph.neighbors(nid))
+                neighbor_vals = []
+                for n in neighbors:
+                    # Only consider neighbors that have agents
+                    if n in node_potentials:
+                        neighbor_vals.append(node_potentials[n])
+
+                # Apply spatial diffusion (Laplacian)
+                node.agent.sync_diffusion(neighbor_vals, dt)
+
+        # Step 3: Physics & Decay Step
         for node in self.nodes.values():
             if node.agent:
                 node.agent.update(dt, time)

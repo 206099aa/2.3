@@ -122,21 +122,39 @@ class DeepSCIAnalyzer:
         plt.savefig("fig_sci_resilience.png", dpi=300)
 
     def plot_heterogeneity_synergy(self):
-        """[Fig 5] Heterogeneous Efficiency."""
+        """
+        [Fig 5] Heterogeneous Efficiency.
+        [FIXED] Now uses dynamic mass from telemetry instead of hardcoded values.
+        """
         if self.single_run_df is None: return
         print("🤝 Painting Heterogeneity...")
 
-        # Calculate SEC for each agent
-        agg = self.single_run_df.groupby('id').agg({'energy': 'max', 'vel': 'mean', 'time': 'max'}).reset_index()
+        # 1. Aggregate Data per Agent
+        # [CRITICAL FIX] Added 'mass': 'mean' to capture the actual dynamic mass of the convoy
+        agg = self.single_run_df.groupby('id').agg({
+            'energy': 'max',  # Total energy consumed
+            'vel': 'mean',  # Average velocity
+            'time': 'max',  # Total duration
+            'mass': 'mean'  # Average mass (should be constant per episode)
+        }).reset_index()
+
+        # 2. Determine Role
         agg['Type'] = agg['id'].apply(lambda x: 'Scout' if 'Scout' in x else 'Hauler')
-        agg['Mass'] = agg['Type'].apply(lambda x: 1500 if x == 'Scout' else 5000)
+
+        # 3. Calculate Distance
         agg['Dist'] = agg['vel'] * agg['time']
-        agg['SEC'] = agg['energy'] / (agg['Mass'] * agg['Dist'] + 1.0)
+
+        # 4. Calculate Specific Energy Consumption (SEC)
+        # Formula: SEC = Total_Energy / (Total_Mass * Distance)
+        # Unit: Joules / (kg * m)
+        # Added epsilon to avoid division by zero
+        agg['SEC'] = agg['energy'] / (agg['mass'] * agg['Dist'] + 1.0)
 
         plt.figure(figsize=(6, 5))
         sns.boxplot(data=agg, x='Type', y='SEC', palette="Set2")
         sns.stripplot(data=agg, x='Type', y='SEC', color='black', alpha=0.5)
-        plt.title("Energy Efficiency by Role")
+
+        plt.title("Heterogeneous Energy Efficiency (Dynamic Mass Corrected)")
         plt.ylabel("Specific Energy Consumption (J / kg·m)")
         plt.savefig("fig_sci_heterogeneity.png", dpi=300)
 

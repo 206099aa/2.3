@@ -30,10 +30,6 @@ class PolachContactModel:
         epsilon = 1e-5
         v_ref = max(abs(v_vehicle), epsilon)
 
-        # Creepage (Slip ratio)
-        # Simplified: Assume control system maintains optimal slip,
-        # but environment reduces the peak of the curve.
-
         # [Coupling Logic]
         # Mud creates a lubrication layer, significantly reducing mu
         # Exponential decay of friction with mud depth
@@ -168,7 +164,6 @@ class Locomotive(RollingStock):
         # 2. Adhesion Limit (Physics Check)
         normal_force = self.adhesion_weight * GRAVITY
         # Assume wheel speed ~ vehicle speed for simple adhesion check
-        # (Detailed slip dynamics omitted for simulation speed, using quasi-static limit)
         f_limit, mu_eff = self.contact.compute_adhesion_limit(normal_force, velocity, velocity, mud_factor)
 
         # 3. Clamp Force
@@ -194,7 +189,6 @@ class DCMotorModel:
 
     def __init__(self, specs):
         self.current = 0.0
-    # Placeholder for more complex electrical dynamics if needed
 
 
 # =========================================================================
@@ -279,7 +273,6 @@ class TrainConvoy:
             x_r, v_r = state[2 * idx_rear], state[2 * idx_rear + 1]
 
             # Geometric distance
-            # nominal_center_dist = half_len_f + 1.0 + half_len_r
             nom_dist = self.units[idx_front].length / 2 + 1.0 + self.units[idx_rear].length / 2
 
             dx = (x_f - x_r) - nom_dist
@@ -315,8 +308,6 @@ class TrainConvoy:
                     f_trac = -brake_force * np.sign(v_curr) if abs(v_curr) > 0.1 else 0.0
 
             # C. Coupler Forces
-            # Unit i is pulled BACK by coupler i (if exists)
-            # Unit i is pushed FRONT by coupler i-1 (if exists)
             f_couple_net = 0.0
 
             # Rear coupler (Pulling back)
@@ -328,7 +319,6 @@ class TrainConvoy:
                 f_couple_net += coupler_forces[i - 1]
 
             # D. Net Force & Acceleration
-            # F = ma
             f_net = f_trac - f_res + f_couple_net
             acc = f_net / unit.mass
 
@@ -360,12 +350,12 @@ class TrainConvoy:
         # Return telemetry of the Locomotive (Lead Unit)
         return {
             'loco_vel': self.state[1],
-            'motor_current': tr / 400.0,  # Dummy scaling for current
+            'loco_pos': self.state[0],  # [Verified Fix] Exports Absolute Physics Odometer
+            'motor_current': tr / 400.0,
             'coupler_force_1': cf,
             'mu_effective': mu,
             'total_mass': sum([u.mass for u in self.units])
         }
 
     def _init_position(self, spacing):
-        # Already handled in __init__
         pass
