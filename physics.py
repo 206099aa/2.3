@@ -209,6 +209,9 @@ class TrainConvoy:
 
         self._build_train(train_config_name)
 
+        # [CRITICAL FIX] Store total mass as an attribute for Stability Monitor
+        self.mass_total = sum(u.mass for u in self.units)
+
         # State Vector: [x0, v0, x1, v1, ..., xn, vn]
         self.dof = len(self.units) * 2
         self.state = np.zeros(self.dof)
@@ -225,7 +228,7 @@ class TrainConvoy:
                 current_x -= dist
 
         logger.info(
-            f"Initialized Train {train_config_name} with {len(self.units)} units. Total Mass: {sum(u.mass for u in self.units) / 1000:.1f}t")
+            f"Initialized Train {train_config_name} with {len(self.units)} units. Total Mass: {self.mass_total / 1000:.1f}t")
 
     def _build_train(self, config_name):
         """Construct the convoy from config specs."""
@@ -354,7 +357,7 @@ class TrainConvoy:
             'motor_current': tr / 400.0,
             'coupler_force_1': cf,
             'mu_effective': mu,
-            'total_mass': sum([u.mass for u in self.units])
+            'total_mass': self.mass_total
         }
 
     def _init_position(self, spacing):

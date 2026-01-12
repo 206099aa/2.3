@@ -112,18 +112,25 @@ class LongitudinalMPC:
 # =========================================================================
 
 class ControlMode(Enum):
+    """
+    [Control Mode]
+    STIGMERGY_FOLLOW: Follow the holographic flow field (Hauler default).
+    ACTIVE_SCOUTING:  Explore and update risk maps (Scout default).
+    PHYSICS_FALLBACK: Degradation mode when Cyber layer fails (Self-Healing).
+    EMERGENCY_STOP:   Mechanical failure.
+    """
     STIGMERGY_FOLLOW = auto()
     ACTIVE_SCOUTING = auto()
-    PHYSICS_FALLBACK = auto()
+    PHYSICS_FALLBACK = auto()  # Cyber-Resilience
     EMERGENCY_STOP = auto()
 
 
 class VehicleState(Enum):
     IDLE = auto()
-    MISSION_OP = auto()
+    MISSION_OP = auto()  # Loading/Unloading
     MOVING = auto()
-    WAITING_INTERLOCK = auto()
-    RECOVERY = auto()
+    WAITING_INTERLOCK = auto()  # Waiting for switch confirmation
+    RECOVERY = auto()  # Self-healing process
 
 
 @dataclass
@@ -138,7 +145,7 @@ class EnergyAudit:
 
 
 # =========================================================================
-# [Layer 2] Cyber-Physical Agent Implementation
+# [Layer 2] Cyber-Physical Agent Implementation (Multi-Body Edition)
 # =========================================================================
 
 class VehicleAgent:
@@ -148,6 +155,9 @@ class VehicleAgent:
         self.env = global_config['environment']
         self.map = map_graph
         self.infra = infra_agents
+
+        # [Perception] Injected by main.py later
+        self.all_vehicles = []
 
         # [Heterogeneity] Role Definition
         train_cfg = global_config['train_configurations'][train_type_name]
@@ -162,13 +172,19 @@ class VehicleAgent:
         sim_dt = global_config['simulation']['dt']
         self.controller = LongitudinalMPC(dt=sim_dt, horizon=20)
 
+        # [Fix: Odometer Anchor] Records physics position at edge entry
+        self.edge_entry_odometer = 0.0
+
         # --- 3. Navigation ---
         if start_node in self.map.nodes:
             self.pos_2d = np.array(self.map.nodes[start_node].pos, dtype=float)
+            # [Fix: Anti-Clipping Spawn] Add micro-jitter to prevent 0-distance locking
+            self.pos_2d += np.random.uniform(-1.0, 1.0, size=2)
         else:
             self.pos_2d = np.array([0.0, 0.0])
 
         self.current_node_id = start_node
+        self.previous_node_id = None  # [Fix: Memory for Anti-U-Turn]
         self.next_node_id = None
         self.target_node = self._assign_target()
         self.router = IntelligentRouter(map_graph)
@@ -183,6 +199,10 @@ class VehicleAgent:
         self.energy = EnergyAudit()
         self.last_telemetry = {}
 
+        # [Fix: Watchdog & Startup Timers]
+        self.stuck_timer = 0.0
+        self.startup_timer = 0.0
+
     def step(self, dt, global_time):
         """[Main Loop] Sense -> Plan -> MPC -> Act"""
         # 1. Perception
@@ -191,26 +211,87 @@ class VehicleAgent:
             logger.warning(f"[{self.id}] Comm Loss! Downgrading.")
             self.mode = ControlMode.PHYSICS_FALLBACK
 
-        # 2. Planning
-        if self.state == VehicleState.IDLE:
-            self._handle_idle_logic(dt)
-        elif self.state == VehicleState.MOVING:
-            if self.mode == ControlMode.PHYSICS_FALLBACK:
-                self._plan_fallback_crawl()
-            elif self.is_scout:
-                self._plan_active_scouting(global_time)
-            else:
-                self._plan_flow_following(global_time)
+        # [Fix: Startup Timer for Depot Exit]
+        # Allow vehicles time to clear the depot without triggering AEB immediately
+        self.startup_timer += dt
+        is_startup_phase = self.startup_timer < 15.0  # Grace period
 
-        # 3. Control (MPC)
+        # 2. Planning
+        # [Fix: Ensure target exists via Watchdog]
+        if not self.next_node_id:
+            if self.state == VehicleState.IDLE:
+                self._handle_idle_logic(dt)
+            elif self.state == VehicleState.MOVING:
+                if self.mode == ControlMode.PHYSICS_FALLBACK:
+                    self._plan_fallback_crawl()
+                elif self.is_scout:
+                    self._plan_active_scouting(global_time)
+                else:
+                    self._plan_flow_following(global_time)
+
+            # [Fix: Logic-Compliant Deadlock Recovery]
+            # If we STILL have no next_node_id after planning, we are stuck.
+            if not self.next_node_id:
+                self.stuck_timer += dt
+                if self.stuck_timer > 5.0:  # 5s timeout
+                    # DO NOT change target. Force re-planning to same target.
+                    # Clearing queue forces Router to find a NEW path from scratch.
+                    logger.warning(f"[{self.id}] Stuck. Forcing re-planning to {self.target_node}.")
+                    self.path_queue.clear()
+                    self.stuck_timer = 0.0
+            else:
+                self.stuck_timer = 0.0
+
+        # 3. Control (MPC + AEB)
         throttle_cmd = 0.0
-        if self.state == VehicleState.MOVING:
+        dynamics = None
+
+        # Only move physically if we have a valid route
+        if self.next_node_id:
+            self.state = VehicleState.MOVING
             v_ref = self._get_mode_speed_limit()
-            if self.next_node_id: self._trigger_switch(global_time)
+
+            # [Fix: Enhanced AEB with Angle Check & Startup Exemption]
+            safe_dist = 40.0
+            collision_risk = False
+
+            # Only enable AEB after startup phase to allow clearing depot
+            if not is_startup_phase:
+                my_target_pos = np.array(self.map.nodes[self.next_node_id].pos)
+                my_pos = self.pos_2d
+                # Heading vector
+                heading = my_target_pos - my_pos
+                heading_norm = np.linalg.norm(heading)
+                if heading_norm > 0.1:
+                    heading /= heading_norm
+                else:
+                    heading = np.array([1.0, 0.0])
+
+                for other in self.all_vehicles:
+                    if other.id == self.id: continue
+
+                    vec_to_other = other.pos_2d - my_pos
+                    dist = np.linalg.norm(vec_to_other)
+
+                    if dist < safe_dist:
+                        # Angle check: Only brake if obstacle is IN FRONT (>45deg cone)
+                        to_other_dir = vec_to_other / (dist + 0.001)
+                        angle_cos = np.dot(heading, to_other_dir)
+
+                        if angle_cos > 0.7:
+                            v_ref = 0.0  # EMERGENCY BRAKE
+                            collision_risk = True
+                            break
+
+                            # [Fix: Startup Boost]
+            # If in startup phase, force speed to separate overlapping vehicles
+            if is_startup_phase:
+                v_ref = max(v_ref, 8.0)
+
+            self._trigger_switch(global_time)
 
             # [MPC Execution]
-            # Estimate total mass for the internal model
-            total_mass = sum([u.mass for u in self.physics.units])
+            total_mass = getattr(self.physics, 'mass_total', 5000.0)
             local_mud = self.env.get('mud_factor', 0.5)
 
             throttle_cmd = self.controller.solve(
@@ -220,29 +301,97 @@ class VehicleAgent:
                 mud_factor=local_mud
             )
 
-        # 4. Actuation (Physics)
-        local_mud = self.env.get('mud_factor', 0.5)
-        dynamics = self.physics.step_rk4(dt, throttle_cmd, local_mud)
+            # 4. Actuation (Physics)
+            dynamics = self.physics.step_rk4(dt, throttle_cmd, local_mud)
+            self.current_speed = dynamics['loco_vel']
 
-        self.current_speed = dynamics['loco_vel']
-        self._sync_position(dt)
+            # [Fix: Sync Logic]
+            self._sync_position(dynamics)
+
+            self.energy.traction_joules += abs(dynamics['motor_current'] * 400.0) * dt
+
+        else:
+            # Idle Physics (Brake)
+            throttle_cmd = -1.0 if abs(self.current_speed) > 0.1 else 0.0
+            dynamics = self.physics.step_rk4(dt, throttle_cmd, self.env.get('mud_factor', 0.5))
+            self.current_speed = dynamics['loco_vel']
+            # Don't update pos_2d if idle
 
         # 5. Feedback
         self._broadcast_state(global_time)
-        self.energy.traction_joules += abs(dynamics['motor_current'] * 400.0) * dt
+
+        # Return proper telemetry even if idle
+        if not dynamics:
+            dynamics = {
+                'loco_vel': 0.0, 'loco_pos': 0.0, 'motor_current': 0.0,
+                'coupler_force_1': 0.0, 'mu_effective': 0.0
+            }
 
         return self._pack_telemetry(dynamics)
 
-    # ... [Rest of the Planning Methods remain similar but concise] ...
+    def _sync_position(self, dynamics):
+        """
+        [Coordinate Drift Fix + Overshoot Protection]
+        """
+        if not self.next_node_id:
+            return  # Stay at current node
+
+        # 1. Get Geometry
+        p_start = np.array(self.map.nodes[self.current_node_id].pos)
+        p_end = np.array(self.map.nodes[self.next_node_id].pos)
+        edge_vec = p_end - p_start
+        edge_len = np.linalg.norm(edge_vec)
+
+        if edge_len < 0.1:
+            self.current_node_id = self.next_node_id
+            self.next_node_id = None
+            return
+
+        # 2. Calculate Progress based on Physics
+        current_abs_pos = dynamics['loco_pos']
+        dist_on_edge = current_abs_pos - self.edge_entry_odometer
+
+        progress = dist_on_edge / edge_len
+
+        # 3. Update 2D Position
+        if progress >= 1.0:
+            # Arrival Logic
+            self.pos_2d = p_end
+
+            # [Fix: Update History to prevent U-Turn]
+            self.previous_node_id = self.current_node_id
+
+            self.current_node_id = self.next_node_id
+            self.next_node_id = None
+
+            # [CRITICAL FIX] Update Anchor: Consume edge length
+            self.edge_entry_odometer += edge_len
+            self.stuck_timer = 0.0  # Reset watchdog
+
+            # Instant Re-plan for smoothness
+            if self.is_scout:
+                self._plan_active_scouting(0)
+            else:
+                self._plan_flow_following(0)
+        else:
+            self.pos_2d = p_start + edge_vec * progress
 
     def _plan_active_scouting(self, now):
         self.router.step(now)
         if not self.path_queue and not self.next_node_id:
             path = self.router.get_dynamic_path(self.current_node_id, self.target_node, self)
             self.path_queue = deque(path)
+
+            # Remove current node from path if present
             if self.path_queue and self.path_queue[0] == self.current_node_id:
                 self.path_queue.popleft()
-            self.next_node_id = self.path_queue[0] if self.path_queue else None
+
+            if self.path_queue:
+                self.next_node_id = self.path_queue.popleft()
+
+            # [Fix: Fallback] If pathfinding failed (e.g. cold start), re-roll target
+            if not self.next_node_id:
+                self.target_node = self._assign_target()
 
         local_mud = self.env.get('mud_factor', 0.5)
         if local_mud > 0.6:
@@ -251,28 +400,60 @@ class VehicleAgent:
                 infra.flow_field.inject_event(mass=5.0, velocity=0.0)
 
     def _plan_flow_following(self, now):
+        """
+        [Algorithm] Stigmergy-based Navigation.
+        Follows the gradient of the Holographic Flow Field.
+        """
         if self.next_node_id: return
-        neighbors = list(self.map.graph.neighbors(self.current_node_id))
+
+        all_neighbors = list(self.map.graph.neighbors(self.current_node_id))
+        if not all_neighbors: return  # Dead end
+
+        # [Fix: Anti-Backtracking Logic]
+        # Only consider nodes that are NOT where we just came from.
+        # This forces the train to keep moving forward in the graph.
+        candidates = [n for n in all_neighbors if n != self.previous_node_id]
+
+        # If dead end (only neighbor is previous), we MUST reverse.
+        if not candidates:
+            candidates = all_neighbors
+
         best_next = None
-        min_potential = float('inf')
-        for n in neighbors:
+        min_cost = float('inf')
+
+        current_pos = np.array(self.map.nodes[self.current_node_id].pos)
+        target_pos = np.array(self.map.nodes[self.target_node].pos)
+        # Euclidean distance remaining
+        current_dist = np.linalg.norm(target_pos - current_pos)
+
+        for n in candidates:
             infra = self.infra.get(n)
             p = infra.flow_field.get_state()['potential'] if infra else 0.0
-            dist = np.linalg.norm(np.array(self.map.nodes[n].pos) - np.array(self.map.nodes[self.target_node].pos))
-            cost = p * 2.0 + dist
-            if cost < min_potential:
-                min_potential = cost
+
+            pos_n = np.array(self.map.nodes[n].pos)
+            dist_n = np.linalg.norm(pos_n - target_pos)
+
+            # Cost = Potential * Weight + Distance
+            # If Potential is 0 (Cold Start), this becomes Distance-only (A* heuristic)
+            cost = p * 10.0 + dist_n
+
+            # Soft Penalty for moving away from target (Anti-U-Turn heuristic 2)
+            if dist_n > current_dist:
+                cost += 50.0
+
+            if cost < min_cost:
+                min_cost = cost
                 best_next = n
-        self.next_node_id = best_next
+
+        if best_next:
+            self.next_node_id = best_next
+        else:
+            self.next_node_id = random.choice(candidates)
 
     def _plan_fallback_crawl(self):
         if self.next_node_id: return
         neighbors = list(self.map.graph.neighbors(self.current_node_id))
-        if not neighbors: return
-        best = min(neighbors, key=lambda n: np.linalg.norm(
-            np.array(self.map.nodes[n].pos) - np.array(self.map.nodes[self.target_node].pos)
-        ))
-        self.next_node_id = best
+        if neighbors: self.next_node_id = random.choice(neighbors)
 
     def _trigger_switch(self, now):
         if self.mode == ControlMode.PHYSICS_FALLBACK: return
@@ -318,25 +499,31 @@ class VehicleAgent:
         }
 
     def _handle_idle_logic(self, dt):
-        if random.random() < 0.01:
-            self.state = VehicleState.MOVING
+        if not self.target_node:
             self.target_node = self._assign_target()
 
-    def _assign_target(self):
-        return random.choice(list(self.map.nodes.keys()))
+        if self.target_node and self.current_node_id != self.target_node:
+            self.state = VehicleState.MOVING
 
-    def _sync_position(self, dt):
-        if self.next_node_id:
-            target_pos = np.array(self.map.nodes[self.next_node_id].pos)
-            vec = target_pos - self.pos_2d
-            dist = np.linalg.norm(vec)
-            if dist > 0.5:
-                self.pos_2d += (vec / dist) * self.current_speed * dt
-            else:
-                self.current_node_id = self.next_node_id
-                self.next_node_id = None
+    def _assign_target(self):
+        nodes = list(self.map.nodes.keys())
+        if not nodes: return None
+        # Don't pick current node
+        opts = [n for n in nodes if n != self.current_node_id]
+        return random.choice(opts) if opts else nodes[0]
 
     def _pack_telemetry(self, dynamics):
+        # [Fix: Export Unit Offsets for Viz]
+        unit_offsets = []
+        # Reconstruct relative positions from physics.units
+        current_offset = 0.0
+        for i, unit in enumerate(self.physics.units):
+            if i > 0:
+                gap = 1.0  # Standard coupler
+                prev = self.physics.units[i - 1]
+                current_offset += (prev.length / 2 + gap + unit.length / 2)
+            unit_offsets.append(current_offset)
+
         self.last_telemetry = {
             'id': self.id,
             'state': self.state.name,
@@ -344,10 +531,11 @@ class VehicleAgent:
             'vel': self.current_speed,
             'energy': self.energy.total,
             'comm_health': self.comm_health,
-            'current': dynamics['motor_current'],
-            'force': dynamics['coupler_force_1'],
-            'mass': dynamics.get('total_mass', 5000),
-            'mu': dynamics['mu_effective']
+            'current': dynamics.get('motor_current', 0.0),
+            'force': dynamics.get('coupler_force_1', 0.0),
+            'mass': getattr(self.physics, 'mass_total', 5000),
+            'mu': dynamics.get('mu_effective', 0.0),
+            'unit_offsets': unit_offsets
         }
         return self.last_telemetry
 

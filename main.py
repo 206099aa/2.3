@@ -62,7 +62,6 @@ class DecentralizedSimulation:
     def _deploy_fleet(self):
         """
         Deploy Mixed Platoon: Scouts (Fast/Light) + Haulers (Heavy/Slow).
-        [Fixed] Updated instantiation to match new VehicleAgent signature.
         """
         # Configuration for 4 vehicles
         # ID, Train_Type_Name, Start_Node, Is_Malicious_Class
@@ -80,11 +79,11 @@ class DecentralizedSimulation:
             # Select Agent Class
             AgentClass = MaliciousVehicle if is_malicious else VehicleAgent
 
-            # [Fix] Pass 't_type' (string) and 'self.cfg' (full config)
+            # Pass 't_type' (string) and 'self.cfg' (full config)
             agent = AgentClass(
                 agent_id=v_id,
-                train_type_name=t_type,  # <--- Corrected Argument
-                global_config=self.cfg,  # <--- Corrected Argument
+                train_type_name=t_type,
+                global_config=self.cfg,
                 start_node=start_node,
                 map_graph=self.map,
                 infra_agents=self.infra_agents
@@ -93,6 +92,11 @@ class DecentralizedSimulation:
 
             role = "MALICIOUS" if is_malicious else t_type
             logger.info(f" -> Deployed {v_id} ({role}) at {start_node}")
+
+        # [CRITICAL FIX] Share perception of all vehicles for collision avoidance (AEB)
+        # Without this, vehicles are blind to each other and will clip through.
+        for v in self.vehicles:
+            v.all_vehicles = self.vehicles
 
     def step(self, t, dt):
         # 1. Infrastructure Update
@@ -116,8 +120,9 @@ class DecentralizedSimulation:
         # 3. Theoretical Validation
         V_t = self.monitor.step(t, self.vehicles, self.infra_agents)
 
-        if int(t) % 10 == 0 and abs(t - int(t)) < dt / 2:
-            print(f"T={t:04.0f}s | Lyapunov V={V_t:.2f} | Active Vehicles={len(self.vehicles)}", end='\r')
+        # Optional: Print status periodically
+        # if int(t) % 10 == 0 and abs(t - int(t)) < dt/2:
+        #     print(f"T={t:04.0f}s | Lyapunov V={V_t:.2f} | Active Vehicles={len(self.vehicles)}", end='\r')
 
     def run(self):
         duration = self.cfg['simulation']['duration']
@@ -128,7 +133,7 @@ class DecentralizedSimulation:
         def sim_generator():
             t = 0.0
             step_count = 0
-            RENDER_SKIP = 20
+            RENDER_SKIP = 50  # 渲染帧率控制 (例如每10步渲染一次)
 
             while t < duration:
                 self.step(t, dt)

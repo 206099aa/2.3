@@ -36,7 +36,6 @@ class HeadlessRunner:
         self.logs = []
 
     def _init_pop(self):
-        # [Fix] Updated scenarios to use train names and correct args
         scenarios = [
             ('Heavy_Hauler', 'Start_1', 0.0),
             ('Fast_Scout', 'Start_2', 10.0)
@@ -45,8 +44,8 @@ class HeadlessRunner:
         for i, (t_type, start_node, delay) in enumerate(scenarios):
             v = VehicleAgent(
                 agent_id=f"V_{i}_{t_type}",
-                train_type_name=t_type,  # <--- Corrected
-                global_config=self.cfg,  # <--- Corrected
+                train_type_name=t_type,
+                global_config=self.cfg,
                 start_node=start_node,
                 map_graph=self.grid,
                 infra_agents=self.infra_agents
@@ -79,7 +78,6 @@ class HeadlessRunner:
 class OracleRunner:
     """
     [Benchmark] God-Mode Oracle Solver.
-    [Fix] Now correctly estimates mass from 'train_configurations' for fair comparison.
     """
 
     def __init__(self, config):
@@ -90,17 +88,12 @@ class OracleRunner:
         self.beta_e = 0.1
 
     def _estimate_convoy_mass(self, train_name):
-        """
-        [New Helper] Calculates the EXPECTED (Average) mass of a stochastic convoy.
-        """
         try:
             t_cfg = self.cfg['train_configurations'][train_name]
             specs = self.cfg['vehicle_specs']
 
-            # 1. Locomotive Mass
             loco_mass = specs[t_cfg['locomotive']]['mass']
 
-            # 2. Wagon Mass (Average Count * Average Load)
             w_spec = specs[t_cfg['wagon_type']]
             min_w, max_w = t_cfg['wagon_count']
             avg_count = (min_w + max_w) / 2.0
@@ -117,19 +110,14 @@ class OracleRunner:
             return total_mass
         except Exception as e:
             print(f"Oracle Mass Estimation Error: {e}")
-            return 5000.0  # Fallback
+            return 5000.0
 
     def solve_theoretical_optimum(self, start_node, target_node, train_type="Heavy_Hauler"):
-        # 1. Get Physical Properties (Estimated Average)
         mass = self._estimate_convoy_mass(train_type)
-
-        # Get Max Speed from Loco specs
         t_cfg = self.cfg['train_configurations'][train_type]
         max_v = self.cfg['vehicle_specs'][t_cfg['locomotive']]['max_speed']
-
         global_mud = self.cfg['environment']['mud_factor']
 
-        # 2. Cost Function
         def oracle_weight(u, v, edge_attr):
             dist = edge_attr.get('length', 300.0)
             mud = global_mud
@@ -137,15 +125,18 @@ class OracleRunner:
             v_limit = max(1.0, max_v * (1.0 - 0.6 * mud))
             time_cost = dist / v_limit
 
-            f_davis = self.davis.compute(mass, v_limit, is_lead_unit=True, mud_factor=mud)
-            # Add some soil resistance approximation
-            f_soil = mass * 9.81 * (0.02 * mud)
+            # [FIXED] Updated to use new physics API
+            f_res = self.davis.compute(
+                mass=mass,
+                vel=v_limit,
+                is_lead_unit=True,
+                mud_factor=mud
+            )
 
-            energy_cost = (f_davis + f_soil) * dist
+            energy_cost = f_res * dist
 
             return self.alpha_t * time_cost + self.beta_e * energy_cost
 
-        # 3. Solve
         try:
             path = nx.dijkstra_path(
                 self.grid.graph,
@@ -164,7 +155,13 @@ class OracleRunner:
                 v_act = max(1.0, max_v * (1.0 - 0.6 * global_mud))
                 total_time += dist / v_act
 
-                f_res = self.davis.compute(mass, v_act, True, mud_factor=global_mud) + (mass * 9.81 * 0.02 * global_mud)
+                # [FIXED] Updated API
+                f_res = self.davis.compute(
+                    mass=mass,
+                    vel=v_act,
+                    is_lead_unit=True,
+                    mud_factor=global_mud
+                )
                 total_energy += f_res * dist
 
             return {
@@ -179,10 +176,8 @@ class OracleRunner:
 
 
 if __name__ == "__main__":
-    # [SCI] Updated Sweep Plan for New Config Structure
     sweep_plan = {
         'environment.mud_factor': [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
-        # [Fix] Updated path to PID params
         'vehicle_specs.Loco_Class_A.pid.kp': [8000]
     }
 
@@ -216,7 +211,6 @@ if __name__ == "__main__":
         base_cfg['environment']['mud_factor'] = mud
         oracle = OracleRunner(base_cfg)
 
-        # Standard benchmark mission
         res = oracle.solve_theoretical_optimum("Start_1", "N_3_3", "Heavy_Hauler")
 
         if res:

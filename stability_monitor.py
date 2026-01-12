@@ -41,7 +41,11 @@ class LyapunovMonitor:
             # 动能误差: 0.5 * m * (v - v_ref)^2
             # 这里简化为速度偏差的平方
             v_err = v.current_speed - getattr(v, 'target_speed_ref', 0.0)
-            v_track_sum += 0.5 * v.physics.mass_total * (v_err ** 2)
+
+            # [Physics Integration] 使用物理引擎中的实时质量
+            # 注意：需确保 physics.py 已修复并包含 mass_total 属性
+            mass = getattr(v.physics, 'mass_total', 5000.0)
+            v_track_sum += 0.5 * mass * (v_err ** 2)
 
             # 势能误差: 距离目标的剩余距离 (L1 norm for robustness)
             if v.next_node_id:
@@ -55,7 +59,7 @@ class LyapunovMonitor:
             if hasattr(node, 'agent') and node.agent:
                 # 读取流场湍流度 (Turbulence)
                 # Turbulence = 1 - Order_Parameter
-                flow_state = node.agent.flow_field.get_flow_state()
+                flow_state = node.agent.flow_field.get_state()
                 turbulence = flow_state.get('turbulence', 0.0)
                 potential = flow_state.get('potential', 0.0)
 
@@ -64,7 +68,8 @@ class LyapunovMonitor:
 
         # 3. Energy Dissipation Potential (V_energy)
         # 系统总能耗作为一种广义势能，在优化过程中应被抑制
-        v_energy_sum = sum([v.energy.total_energy for v in vehicles])
+        # [Fix] Changed 'total_energy' to 'total' to match vehicle.py definition
+        v_energy_sum = sum([v.energy.total for v in vehicles])
 
         # Total Lyapunov Function
         V_total = (self.alpha_track * v_track_sum +

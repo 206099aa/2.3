@@ -15,9 +15,6 @@ logger = logging.getLogger("Distributed.Router")
 
 # =========================================================================
 # [Layer 1] Stochastic Gossip Channel (Routing Control Plane)
-# -------------------------------------------------------------------------
-# Simulates the control plane messaging for routing table exchanges.
-# distinct from the data plane channel in comms.py.
 # =========================================================================
 
 @dataclass
@@ -53,9 +50,6 @@ class GossipChannel:
 
 # =========================================================================
 # [Layer 2] Physics-Aware Link Evaluator (Methodology Core)
-# -------------------------------------------------------------------------
-# Implements the CPS Routing Cost Function J.
-# J = alpha * Time + beta * Energy(Physics) + gamma * Risk(Health)
 # =========================================================================
 
 class KinodynamicLinkEvaluator:
@@ -95,15 +89,17 @@ class KinodynamicLinkEvaluator:
         v_est = v_max * (1.0 - 0.6 * mud)  # Slow down in mud
         v_est = max(1.0, v_est)
 
-        # A. Davis Resistance (Rolling + Aero)
+        # [Physics Integration]
+        # Calculate resistance force including mud/soil effects
         # Assume standard mass 5000kg for routing estimation
-        f_davis = self.davis_model.compute_resistance(mass_kg=5000.0, velocity=v_est)
+        f_davis = self.davis_model.compute(
+            mass=5000.0,
+            vel=v_est,
+            is_lead_unit=True,
+            mud_factor=mud
+        )
 
-        # B. Soil Mechanics Resistance (Sinkage Drag)
-        # F_soil ~ k * z^n (Bekker's theory simplified linear approx)
-        f_soil = 5000.0 * 9.81 * (0.05 * mud)
-
-        total_force = f_davis + f_soil
+        total_force = f_davis
         predicted_energy = total_force * dist  # Work = Force * Distance
 
         # 3. Time Cost
@@ -278,7 +274,7 @@ class DistributedProtocolSim:
 class IntelligentRouter:
     def __init__(self, grid_map):
         self.protocol = DistributedProtocolSim(grid_map)
-        self.fallback_graph = grid_map.graph  # For initial cold start
+        self.fallback_graph = grid_map.graph  # [Data Source] Static map for warm-start
         self.evaluator = self.protocol.evaluator
 
     def step(self, global_time):
@@ -291,24 +287,30 @@ class IntelligentRouter:
     def get_dynamic_path(self, start, end, vehicle):
         """
         Hybrid Routing Strategy.
-        Prefer Distributed Guidance, Fallback to A* if cold start.
+        Priority 1: Distributed Stigmergy (Dynamic, Physics-aware)
+        Priority 2: Static Navigation (Cold-start Fallback)
         """
-        # 1. Try Distributed Table (Edge Logic)
+        # 1. Try Distributed Table (Edge Logic - Real-time Stigmergy)
         hop = self.protocol.get_next_hop(start, end)
         if hop:
             return [start, hop]
 
-        # 2. Fallback A* (Cloud/Onboard Logic) - Only for initialization
+        # 2. [Critical Fix: Warm Start] Fallback to Static Map A*
+        # If distributed routing isn't ready (Cold Start), immediately calculate
+        # a geometric path using the onboard static map.
+        # This prevents vehicles from freezing at birth.
         try:
-            # Use the same Physics-Aware Cost for consistency
-            def cost_func(u, v, d):
-                return self.evaluator.evaluate_link(u, v, d.get('mud', 0.5))
-
+            # Using 'length' as weight ensures we find the shortest physical path
+            # regardless of current mud/congestion (since we don't know it yet).
             path = nx.astar_path(
                 self.fallback_graph, start, end,
-                heuristic=lambda u, v: 0,
-                weight=cost_func
+                weight='length'
             )
             return path
-        except:
+        except nx.NetworkXNoPath:
+            # Only return empty if truly unreachable physically
+            return []
+        except Exception as e:
+            # Fallback for any graph errors
+            logger.error(f"Routing fallback error: {e}")
             return []
